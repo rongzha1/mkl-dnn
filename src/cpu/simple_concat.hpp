@@ -92,7 +92,7 @@ struct simple_concat_t: public cpu_primitive_t {
         e->set_state(event_t::ready);
     }
 
-    enum { max_num_arrs = 16 };
+    enum { max_num_arrs = 32 };
     typedef typename prec_traits<data_type>::type data_t;
 
 private:
