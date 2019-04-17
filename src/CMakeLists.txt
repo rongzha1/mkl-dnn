@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2016-2017 Intel Corporation
+# Copyright 2016-2018 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,41 +14,120 @@
 # limitations under the License.
 #===============================================================================
 
-set(TARGET_NAME ${LIB_NAME})
-
 file(GLOB_RECURSE HEADERS
+    ${PROJECT_BINARY_DIR}/include/*.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/*.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/*.hpp
-    )
-file(GLOB_RECURSE SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/*.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/*.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp
     )
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/common
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpu/xbyak
     )
+
+# propagate SRC specific flags
+append(CMAKE_C_FLAGS "${CMAKE_SRC_CCXX_FLAGS}")
+append(CMAKE_CXX_FLAGS "${CMAKE_SRC_CCXX_FLAGS}")
+
+# propagate no warning flags
+append(CMAKE_C_FLAGS "${CMAKE_CCXX_NOWARN_FLAGS}")
+append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_NOWARN_FLAGS}")
+
+# propagate sanitizer flags
+append(CMAKE_C_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
+append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
+
+if(NOT MKLDNN_VERBOSE)
+    add_definitions(-DDISABLE_VERBOSE)
+endif()
+
+if(MKLDNN_ENABLE_CONCURRENT_EXEC)
+    add_definitions(-DMKLDNN_ENABLE_CONCURRENT_EXEC)
+endif()
+
+if(NOT MKLDNN_ENABLE_JIT_PROFILING)
+    # XXX: the profiling interface will still be built and present in the
+    # library
+    message(STATUS "Intel\r VTune\t Amplifier JIT profiling disabled")
+    add_definitions(-DMKLDNN_ENABLE_JIT_PROFILING=0)
+elseif(UNIX AND NOT APPLE)
+    # Not every compiler adds -ldl automatically
+    list(APPEND EXTRA_SHARED_LIBS "${CMAKE_DL_LIBS}")
+endif()
 
 if(WIN32)
     add_definitions(-D_WIN)
     add_definitions(-DNOMINMAX)
     # Correct 'jnl' macro/jit issue
     if(${CMAKE_CXX_COMPILER_ID} STREQUAL "Intel")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Qlong-double")
+        append(CMAKE_CXX_FLAGS "/Qlong-double")
     endif()
 endif()
 
-add_library(${TARGET_NAME} SHARED ${HEADERS} ${SOURCES})
-#Add mkldnn.dll to execution PATH
-set(CTESTCONFIG_PATH "${CTESTCONFIG_PATH}\;${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}" PARENT_SCOPE)
-target_link_libraries(${TARGET_NAME} ${${TARGET_NAME}_LINKER_LIBS} ${EXTRA_LIBS})
-set_property(TARGET ${TARGET_NAME} PROPERTY CXX_STANDARD 11)
-set_property(TARGET ${TARGET_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
-set_property(TARGET ${TARGET_NAME} PROPERTY VERSION "${PROJECT_VERSION}.0")
-set_property(TARGET ${TARGET_NAME} PROPERTY SOVERSION "0")
+add_subdirectory(common)
+add_subdirectory(cpu)
 
-install(TARGETS ${TARGET_NAME} DESTINATION lib)
-install(FILES ${HEADERS} DESTINATION include)
+add_library(${LIB_NAME}
+    ${MKLDNN_LIBRARY_TYPE} ${HEADERS} ${${LIB_NAME}_SUB_OBJS})
+
+set_property(TARGET ${LIB_NAME} PROPERTY VERSION "${PROJECT_VERSION}.0")
+set_property(TARGET ${LIB_NAME} PROPERTY SOVERSION "0")
+set_property(TARGET ${LIB_NAME} PROPERTY PUBLIC_HEADER ${HEADERS})
+
+target_include_directories(${LIB_NAME} PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/../include>
+    # $<INSTALL_PREFIX> is required for compatibility with cmake 2.8
+    $<INSTALL_INTERFACE:$<INSTALL_PREFIX>/${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+
+target_link_libraries_build(${LIB_NAME}
+    "${EXTRA_SHARED_LIBS};${EXTRA_STATIC_LIBS}")
+target_link_libraries_install(${LIB_NAME} "${EXTRA_SHARED_LIBS}")
+if(MKLDNN_LIBRARY_TYPE STREQUAL "STATIC")
+    target_link_libraries_install(${LIB_NAME} "${EXTRA_STATIC_LIBS}")
+endif()
+
+set(LIB_EXPORT_NAME "${LIB_NAME}-targets")
+install(TARGETS ${LIB_NAME}
+    EXPORT "${LIB_EXPORT_NAME}"
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    PUBLIC_HEADER DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+
+# Write version and package config files
+set(LIB_CONFIG_GENERATE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(LIB_CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${LIB_NAME}")
+set(LIB_VERSION_FILE
+    "${LIB_CONFIG_GENERATE_DIR}/${LIB_NAME}-config-version.cmake")
+set(LIB_CONFIG_FILE
+    "${LIB_CONFIG_GENERATE_DIR}/${LIB_NAME}-config.cmake")
+write_basic_package_version_file(
+    "${LIB_VERSION_FILE}"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+configure_package_config_file(
+    "../cmake/config.cmake.in"
+    "${LIB_CONFIG_FILE}"
+    INSTALL_DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+install(FILES ${LIB_CONFIG_FILE} ${LIB_VERSION_FILE}
+    DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+string(TOUPPER "${LIB_NAME}::" LIB_NAMESPACE)
+install(EXPORT ${LIB_EXPORT_NAME}
+    NAMESPACE ${LIB_NAMESPACE}
+    DESTINATION ${LIB_CONFIG_INSTALL_DIR})
+
+# On Windows we need to add mkldnn.dll path to CTESTCONFIG_PATH which is later
+# passed to ctest and Visual Studio solutions
+if(WIN32)
+    if(NOT(MINGW))
+        foreach(BUILD_TYPE Release Debug RelWithDebInfo MinSizeRel)
+            append_to_windows_path_list(CTESTCONFIG_PATH
+                "${CMAKE_CURRENT_BINARY_DIR}/${BUILD_TYPE}")
+        endforeach()
+    else()
+        append_to_windows_path_list(CTESTCONFIG_PATH
+            "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+    set(CTESTCONFIG_PATH "${CTESTCONFIG_PATH}" PARENT_SCOPE)
+endif()

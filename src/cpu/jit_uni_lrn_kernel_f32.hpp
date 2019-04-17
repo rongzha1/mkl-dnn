@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2017 Intel Corporation
+* Copyright 2016-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,8 +18,9 @@
 #define CPU_JIT_UNI_LRN_KERNEL_F32_HPP
 
 #include "c_types_map.hpp"
-#include "jit_generator.hpp"
 #include "type_helpers.hpp"
+
+#include "jit_generator.hpp"
 
 namespace mkldnn {
 namespace impl {
@@ -83,6 +84,8 @@ struct jit_uni_lrn_fwd_kernel_f32 : public jit_generator {
 
     int stack_space_needed = 11 * 4 * sizeof(float) + 16;
 
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_lrn_fwd_kernel_f32)
+
     /* cpu specific part */
     using Vmm = typename utils::conditional<isa == avx2, Ymm, Zmm>::type;
 
@@ -135,6 +138,8 @@ struct jit_uni_lrn_fwd_kernel_f32 : public jit_generator {
         Xbyak::Xmm xmask_lo, Xbyak::Xmm xmask_hi,
         Xbyak::Xmm xe_lo, Xbyak::Xmm xe_hi,
         Xbyak::Xmm xsum_lo, Xbyak::Xmm xsum_hi);
+    void nchw_tail_sse42(int tail, Xbyak::Reg64 reg_dst,
+        Xbyak::Xmm xtail_lo, Xbyak::Xmm xtail_hi);
 
     void operator()(jit_args_fwd_t *arg) { ker(arg); }
     void(*ker)(jit_args_fwd_t *);
@@ -154,6 +159,8 @@ struct jit_uni_lrn_bwd_kernel_f32 : public jit_generator {
     float nalphabeta;
 
     int use_h_parallelizm;
+
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_lrn_bwd_kernel_f32)
 
     jit_uni_lrn_bwd_kernel_f32(
         const struct nchw8c_across &J,

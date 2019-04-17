@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2016-2017 Intel Corporation
+# Copyright 2016-2018 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,52 +14,37 @@
 # limitations under the License.
 #===============================================================================
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
-
-add_executable(simple-net-c simple_net.c)
-set_property(TARGET simple-net-c PROPERTY C_STANDARD 99)
-target_link_libraries(simple-net-c ${LIB_NAME})
-add_test(simple-net-c simple-net-c)
-if(WIN32)
-    configure_file(${CMAKE_SOURCE_DIR}/config_template.vcxproj.user
-        simple-net-c.vcxproj.user @ONLY)
-    set_property(TEST simple-net-c PROPERTY ENVIRONMENT "PATH=${CTESTCONFIG_PATH}")
+if (NOT MKLDNN_BUILD_EXAMPLES)
+    return()
 endif()
 
-add_executable(simple-net-cpp simple_net.cpp)
-set_property(TARGET simple-net-cpp PROPERTY CXX_STANDARD 11)
-target_link_libraries(simple-net-cpp ${LIB_NAME})
-add_test(simple-net-cpp simple-net-cpp)
-if(WIN32)
-    configure_file(${CMAKE_SOURCE_DIR}/config_template.vcxproj.user
-        simple-net-cpp.vcxproj.user @ONLY)
-    set_property(TEST simple-net-cpp PROPERTY ENVIRONMENT "PATH=${CTESTCONFIG_PATH}")
-endif()
+# propagate EXAMPLE specific flags
+append(CMAKE_C_FLAGS "${CMAKE_EXAMPLE_CCXX_FLAGS}")
+append(CMAKE_CXX_FLAGS "${CMAKE_EXAMPLE_CCXX_FLAGS}")
 
-add_executable(simple-training-net-c simple_training_net.c)
-set_property(TARGET simple-training-net-c PROPERTY C_STANDARD 99)
-if(WIN32)
-target_link_libraries(simple-training-net-c ${LIB_NAME})
-else()
-target_link_libraries(simple-training-net-c ${LIB_NAME} m)
-endif()
-add_test(simple-training-net-c simple-training-net-c)
-if(WIN32)
-    configure_file(${CMAKE_SOURCE_DIR}/config_template.vcxproj.user
-        simple-training-net-c.vcxproj.user @ONLY)
-    set_property(TEST simple-training-net-c PROPERTY ENVIRONMENT "PATH=${CTESTCONFIG_PATH}")
-endif()
+# propagate sanitizer flags
+append(CMAKE_C_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
+append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
 
-add_executable(simple-training-net-cpp simple_training_net.cpp)
-set_property(TARGET simple-training-net-cpp PROPERTY CXX_STANDARD 11)
-if(WIN32)
-target_link_libraries(simple-training-net-cpp ${LIB_NAME})
-else()
-target_link_libraries(simple-training-net-cpp ${LIB_NAME} m)
-endif()
-add_test(simple-training-net-cpp simple-training-net-cpp)
-if(WIN32)
-    configure_file(${CMAKE_SOURCE_DIR}/config_template.vcxproj.user
-        simple-training-net-cpp.vcxproj.user @ONLY)
-    set_property(TEST simple-training-net-cpp PROPERTY ENVIRONMENT "PATH=${CTESTCONFIG_PATH}")
+include_directories(${PROJECT_SOURCE_DIR}/include)
+
+set_if(UNIX LIBM m)
+
+register_exe(simple-net-c simple_net.c "test")
+register_exe(simple-net-cpp simple_net.cpp "test")
+register_exe(simple-training-net-c simple_training_net.c "test" ${LIBM})
+register_exe(simple-training-net-cpp simple_training_net.cpp "test" ${LIBM})
+register_exe(simple-net-int8-cpp simple_net_int8.cpp "test")
+register_exe(simple-rnn-cpp simple_rnn.cpp "test")
+register_exe(simple-rnn-int8-cpp simple_rnn_int8.cpp "test")
+register_exe(simple-rnn-training-cpp simple_rnn_training.cpp "test")
+
+if (MKLDNN_INSTALL_MODE STREQUAL "BUNDLE")
+    file(GLOB example_sources "*.cpp" "*.c")
+    configure_file(CMakeLists.txt.in CMakeLists.txt @ONLY)
+    install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/CMakeLists.txt
+        ${PROJECT_SOURCE_DIR}/cmake/template.vcxproj.user
+        ${example_sources}
+        DESTINATION examples)
 endif()

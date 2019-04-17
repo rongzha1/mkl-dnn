@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@
 #include <float.h>
 #include <math.h>
 
+#include <cinttypes>
+
 #define ABS(a) ((a)>0?(a):(-(a)))
 
 #define MIN2(a,b) ((a)<(b)?(a):(b))
@@ -36,14 +38,23 @@
 #define STRINGIFy(s) #s
 #define STRINGIFY(s) STRINGIFy(s)
 
+#define CHAIn2(a,b) a b
+#define CHAIN2(a,b) CHAIn2(a,b)
+
 #define CONCAt2(a,b) a ## b
 #define CONCAT2(a,b) CONCAt2(a,b)
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(__GNUC__)
 #define strncasecmp _strnicmp
 #define strcasecmp _stricmp
 #define __PRETTY_FUNCTION__ __FUNCSIG__
 #endif
+
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
+#define collapse(x)
+#endif
+
+#define IFMT "%" PRId64
 
 #define OK 0
 #define FAIL 1
@@ -51,7 +62,7 @@
 enum { CRIT = 1, WARN = 2 };
 
 #define SAFE(f, s) do { \
-    int status = f; \
+    int status = (f); \
     if (status != OK) { \
         if (s == CRIT || s == WARN) { \
             fprintf(stderr, "@@@ error [%s:%d]: '%s' -> %d\n", \
@@ -64,7 +75,7 @@ enum { CRIT = 1, WARN = 2 };
 } while(0)
 
 #define SAFE_V(f) do { \
-    int status = f; \
+    int status = (f); \
     if (status != OK) { \
         fprintf(stderr, "@@@ error [%s:%d]: '%s' -> %d\n", \
                 __PRETTY_FUNCTION__, __LINE__, STRINGIFY(f), status); \
@@ -83,7 +94,7 @@ extern int verbose;
     } \
 } while (0)
 
-enum prim_t { SELF, CONV, IP, REORDER, BNORM, DEF = CONV, };
+enum prim_t { SELF, CONV, DECONV, IP, SHUFFLE, REORDER, BNORM, RNN, DEF = CONV, };
 
 enum bench_mode_t { MODE_UNDEF = 0x0, CORR = 0x1, PERF = 0x2, };
 const char *bench_mode2str(bench_mode_t mode);
@@ -151,6 +162,8 @@ void parse_result(res_t &res, bool &want_perf_report, bool allow_unimpl,
         int status, char *pstr);
 
 /* misc */
+void init_fp_mode();
+
 void *zmalloc(size_t size, size_t align);
 void zfree(void *ptr);
 
@@ -161,7 +174,35 @@ const char *bool2str(bool value);
 bool match_regex(const char *str, const char *pattern);
 bool maybe_skip(const char *skip_impl, const char *impl_str);
 
+template <typename B, typename F>
+void read_csv(const char *csv, B b, F f, const char *delim = ",") {
+    char csv_copy[128];
+    strncpy(csv_copy, csv, sizeof(csv_copy) - 1);
+    csv_copy[sizeof(csv_copy) - 1] = '\0';
+
+    b();
+    const char *s = strtok(csv_copy, delim);
+    for (; s && *s; s = strtok(NULL, delim)) f(s);
+}
+
 typedef int (*bench_f)(int argc, char **argv, bool main_bench);
 int batch(const char *fname, bench_f bench);
 
+/* returns 1 with given probability */
+int flip_coin(ptrdiff_t seed, float probability);
+
+int div_up(const int a, const int b);
+int mxcsr_round(float f);
+
+/* set '0' across *arr:+size */
+void array_set(char *arr, size_t size);
+
+/* wrapper to mkldnn_sgemm
+ * layout = 'F' - column major
+ * layout = 'C' - row major*/
+void gemm(const char *layout, const char *transa, const char *transb,
+        int64_t m, int64_t n, int64_t k,
+        const float alpha, const float *a, const int64_t lda,
+        const float *b, const int64_t ldb,
+        const float beta, float *c, const int64_t ldc);
 #endif

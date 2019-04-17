@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -27,17 +27,14 @@
 
 #include "conv/conv.hpp"
 
-#include "conv/input_conv.hpp"
-
 namespace conv {
 
 /* global driver parameters */
 const dt_conf_t *cfg = conf_f32;
 const char *pattern = NULL;
 dir_t dir = FWD_B;
-int mb = 0;
+int64_t mb = 0;
 alg_t alg = DIRECT;
-merge_t merge = NONE;
 attr_t attr;
 const char *skip_impl = "";
 bool allow_unimpl = false;
@@ -49,14 +46,13 @@ void reset_parameters() {
     dir = FWD_B;
     mb = 0;
     alg = DIRECT;
-    merge = NONE;
     attr = attr_t();
     skip_impl = "";
     allow_unimpl = false;
 }
 
 void check_correctness(const desc_t *c) {
-    const prb_t p(*c, dir, cfg, alg, merge, attr, mb);
+    const prb_t p(*c, dir, cfg, alg, attr, mb);
     char pstr[max_prb_len];
     prb2str(&p, pstr);
 
@@ -92,8 +88,6 @@ int bench(int argc, char **argv, bool main_bench) {
             dir = str2dir(argv[arg] + 6);
         else if (!strncmp("--alg=", argv[arg], 6))
             alg = str2alg(argv[arg] + 6);
-        else if (!strncmp("--merge=", argv[arg], 8))
-            merge = str2merge(argv[arg] + 8);
         else if (!strncmp("--attr=", argv[arg], 7))
             SAFE(str2attr(&attr, argv[arg] + 7), CRIT);
         else if (!strncmp("--skip-impl=", argv[arg], 12))
@@ -104,29 +98,22 @@ int bench(int argc, char **argv, bool main_bench) {
             perf_template = argv[arg] + 16;
         else if (!strcmp("--reset", argv[arg]))
             reset_parameters();
-        else if (!strncmp("--mode=", argv[0], 7))
-            bench_mode = str2bench_mode(argv[0] + 7);
+        else if (!strncmp("--mode=", argv[arg], 7))
+            bench_mode = str2bench_mode(argv[arg] + 7);
         else if (!strncmp("-v", argv[arg], 2))
             verbose = atoi(argv[arg] + 2);
         else if (!strncmp("--verbose=", argv[arg], 10))
             verbose = atoi(argv[arg] + 10);
         else {
             desc_t c;
-            if (str2desc(&c, argv[arg]) == FAIL) {
+            bool is_deconv = 0;
+            if (str2desc(&c, argv[arg], is_deconv) == FAIL) {
                 fprintf(stderr, "driver: unknown option: `%s`, exiting...\n",
                         argv[arg]);
                 exit(2);
             }
             check_correctness(&c);
         }
-    }
-
-    /* deprecated? */
-    if (main_bench && benchdnn_stat.tests == 0) {
-        /* use default list of problems */
-        int N = sizeof(default_list) / sizeof(default_list[0]);
-        for (int n = 0; n < N; ++n)
-            check_correctness(&default_list[n]);
     }
 
     return OK;

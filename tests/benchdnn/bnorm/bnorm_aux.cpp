@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -40,15 +40,23 @@ flags_t str2flags(const char *str) {
     while (str && *str) {
         if (*str == 'G') flags |= GLOB_STATS;
         if (*str == 'S') flags |= USE_SCALESHIFT;
+        if (*str == 'R') flags |= FUSE_BN_RELU;
         str++;
     }
     return flags;
 }
 
 const char *flags2str(flags_t flags) {
-    if (flags & GLOB_STATS)
-        return flags & USE_SCALESHIFT ? "GS" : "G";
-    return flags & USE_SCALESHIFT ? "S" : "";
+    if (flags & GLOB_STATS) {
+        if (flags & USE_SCALESHIFT)
+            return flags & FUSE_BN_RELU ? "GSR" : "GS";
+        return flags & FUSE_BN_RELU ? "GR" : "G";
+    }
+
+    if (flags & USE_SCALESHIFT)
+        return flags & FUSE_BN_RELU ? "SR" : "S";
+
+    return flags & FUSE_BN_RELU ? "R" : "";
 }
 
 int str2desc(desc_t *desc, const char *str) {
@@ -83,7 +91,7 @@ int str2desc(desc_t *desc, const char *str) {
         if (!strncmp(p, s, strlen(p))) { \
             ok = 1; s += strlen(p); \
             char *end_s; d. c = cvfunc(s, &end_s); s += (end_s - s); \
-            /* printf("@@@debug: %s: %d\n", p, d. c); */ \
+            /* printf("@@@debug: %s: " IFMT "\n", p, d. c); */ \
         } \
     } while (0)
 #   define CASE_N(c, cvfunc) CASE_NN(#c, c, cvfunc)
@@ -91,6 +99,7 @@ int str2desc(desc_t *desc, const char *str) {
         int ok = 0;
         CASE_N(mb, mstrtol);
         CASE_N(ic, mstrtol);
+        CASE_N(id, mstrtol);
         CASE_N(ih, mstrtol);
         CASE_N(iw, mstrtol);
         CASE_N(eps, strtof);
@@ -101,6 +110,7 @@ int str2desc(desc_t *desc, const char *str) {
 #   undef CASE_NN
 #   undef CASE_N
 
+    if (d.id == 0) d.id = 1;
     if (d.ih == 0) d.ih = d.iw;
     if (d.iw == 0) d.iw = d.ih;
     if (d.ic == 0 || d.ih == 0 || d.iw == 0) return FAIL;
@@ -117,9 +127,11 @@ void desc2str(const desc_t *d, char *buffer, bool canonical) {
         buffer += l; rem_len -= l; \
     } while(0)
 
-    if (canonical || d->mb != 2) DPRINT("mb%d", d->mb);
-    DPRINT("ic%dih%d", d->ic, d->ih);
-    if (canonical || d->iw != d->ih) DPRINT("iw%d", d->iw);
+    if (canonical || d->mb != 2) DPRINT("mb" IFMT "", d->mb);
+    DPRINT("ic" IFMT "", d->ic);
+    if (d->id > 1) DPRINT("id" IFMT "", d->id);
+    DPRINT("ih" IFMT "", d->ih);
+    if (canonical || d->iw != d->ih || d->id > 1) DPRINT("iw" IFMT "", d->iw);
     if (canonical || d->eps != 1.f/16) DPRINT("eps%g", d->eps);
     DPRINT("n%s", d->name);
 
@@ -130,18 +142,19 @@ void prb2str(const prb_t *p, char *buffer, bool canonical) {
     char desc_buf[max_desc_len];
     char dir_str[32] = {0};
     char dt_str[16] = {0};
-    char fmt_str[32] = {0};
+    char tag_str[32] = {0};
     char flags_str[16] = {0};
     char attr_buf[max_attr_len];
     char check_str[24] = {0};
     desc2str(p, desc_buf, canonical);
     snprintf(dir_str, sizeof(dir_str), "--dir=%s ", dir2str(p->dir));
     snprintf(dt_str, sizeof(dt_str), "--dt=%s ", dt2str(p->dt));
-    snprintf(fmt_str, sizeof(fmt_str), "--fmt=%s ", fmt2str(p->fmt));
+    snprintf(tag_str, sizeof(tag_str), "--tag=%s ", tag2str(p->tag));
     snprintf(flags_str, sizeof(flags_str), "--flags=%s ", flags2str(p->flags));
     bool is_attr_def = p->attr.is_def();
     if (!is_attr_def) {
         int len = snprintf(attr_buf, max_attr_len, "--attr=\"");
+        SAFE_V(len >= 0 ? OK : FAIL);
         attr2str(&p->attr, attr_buf + len);
         len = (int)strnlen(attr_buf, max_attr_len);
         snprintf(attr_buf + len, max_attr_len - len, "\" ");
@@ -152,7 +165,9 @@ void prb2str(const prb_t *p, char *buffer, bool canonical) {
             p->check_alg == ALG_AUTO ? "" : check_str,
             p->dir == FWD_B ? "" : dir_str,
             p->dt == mkldnn_f32 ? "" : dt_str,
-            p->fmt == mkldnn_nchw ? "" : fmt_str,
+            is_bnorm_3d(p)
+                ? p->tag == mkldnn_ncdhw ? "" : tag_str
+                : p->tag == mkldnn_nchw ? "" : tag_str,
             p->flags == (flags_t)0 ? "" : flags_str,
             is_attr_def ? "" : attr_buf,
             desc_buf);

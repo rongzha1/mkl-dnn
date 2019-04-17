@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,8 +18,9 @@
 #include <limits.h>
 #include <assert.h>
 
-#include "common.hpp"
+#include "mkldnn.h"
 
+#include "common.hpp"
 const char *bench_mode2str(bench_mode_t mode) {
     const char *modes[] = {
         "MODE_UNDEF", "CORR", "PERF", "CORR+PERF"
@@ -178,6 +179,7 @@ void parse_result(res_t &res, bool &want_perf_report, bool allow_unimpl,
 }
 
 /* misc */
+
 void *zmalloc(size_t size, size_t align) {
     void *ptr;
 #ifdef _WIN32
@@ -278,7 +280,7 @@ bool maybe_skip(const char *skip_impl, const char *impl_str) {
     return false;
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(__GNUC__)
 #include <windows.h>
 #define PATH_MAX MAX_PATH
 static char *dirname(char *path) {
@@ -293,7 +295,7 @@ static char *dirname(char *path) {
 }
 #else
 #include <libgen.h>
-#endif /* WIN32 */
+#endif /* _WIN32 */
 
 FILE *open_batch_file(const char *fname) {
     const int max_paths = 4;
@@ -302,9 +304,10 @@ FILE *open_batch_file(const char *fname) {
     static char search_paths[max_paths][PATH_MAX] = {{0}};
 
     char *fdir = NULL;
+    char fname_copy[PATH_MAX];
     {
-        char fname_copy[PATH_MAX];
-        strncpy(fname_copy, fname, PATH_MAX);
+        strncpy(fname_copy, fname, PATH_MAX - 1);
+        fname_copy[PATH_MAX - 1] = '\0';
         fdir = dirname(fname_copy);
     }
 
@@ -314,15 +317,17 @@ FILE *open_batch_file(const char *fname) {
             dir_found = true;
             break;
         }
-    if (!dir_found)
+    if (!dir_found) {
+        SAFE_V(n_paths < max_paths ? OK : FAIL);
         strcpy(search_paths[n_paths++], fdir);
+    }
 
     FILE *fp = fopen(fname, "r");
     if (fp) return fp;
 
     for (int n = 0; n < n_paths; ++n) {
-        char fullname[PATH_MAX];
-        snprintf(fullname, PATH_MAX, "%s/%s", search_paths[n], fname);
+        char fullname[PATH_MAX + 2];
+        snprintf(fullname, PATH_MAX + 2, "%s/%s", search_paths[n], fname);
         fp = fopen(fullname, "r");
         print(50, "batch file used: %s\n", fullname);
         if (fp) break;
@@ -363,4 +368,49 @@ int batch(const char *fname, bench_f bench) {
     fclose(fp);
 
     return OK;
+}
+
+int flip_coin(ptrdiff_t seed, float probability) {
+    const ptrdiff_t big_prime = 1000003;
+    const ptrdiff_t prime = 753737;
+    seed *= prime;
+    return (seed % big_prime) < (probability * big_prime);
+}
+
+int div_up(const int a, const int b){
+    SAFE_V(b != 0 ? OK : FAIL);
+    return (a + b - 1) / b;
+}
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#include <xmmintrin.h>
+
+int mxcsr_round(float f) { return _mm_cvtss_si32(_mm_load_ss(&f)); }
+void init_fp_mode() {
+    // We set ftz to avoid denormals in perf measurements
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+}
+#else
+int mxcsr_round(float f) { return (int)nearbyintf(f); }
+void init_fp_mode() {}
+#endif
+
+void array_set(char *arr, size_t size) {
+    for (size_t i = 0; i < size; ++i)
+        arr[i] = 0;
+}
+
+void gemm(const char *layout, const char *transa, const char *transb,
+        int64_t m, int64_t n, int64_t k,
+        const float alpha, const float *a, const int64_t lda,
+        const float *b, const int64_t ldb,
+        const float beta, float *c, const int64_t ldc) {
+    if (*layout == 'F') {
+        mkldnn_sgemm(transa, transb, &m, &n, &k, &alpha, a, &lda, b, &ldb,
+                &beta, c, &ldc);
+    } else {
+        mkldnn_sgemm(transb, transa, &n, &m, &k, &alpha, b, &ldb, a, &lda,
+                &beta, c, &ldc);
+    }
 }

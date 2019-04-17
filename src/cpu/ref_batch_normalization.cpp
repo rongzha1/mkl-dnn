@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2017 Intel Corporation
+* Copyright 2016-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 
 #include "c_types_map.hpp"
 #include "type_helpers.hpp"
+#include "mkldnn_thread.hpp"
+#include "simple_q10n.hpp"
 
 #include "ref_batch_normalization.hpp"
 
@@ -27,75 +29,110 @@ namespace impl {
 namespace cpu {
 
 template <impl::data_type_t data_type>
-void ref_batch_normalization_fwd_t<data_type>::execute_forward() {
-    auto src = reinterpret_cast<const data_t *>(this->input_memory(0));
-    /* FIXME: check this */
-    data_t* mean = conf_.stats_is_src() ?
-        const_cast<data_t*>(reinterpret_cast<const data_t*>(
-               this->input_memory(1))) :
-        reinterpret_cast<data_t*>(this->memory(1));
+void ref_batch_normalization_fwd_t<data_type>::execute_forward(
+        const exec_ctx_t &ctx) const {
+    /* fast return */
+    if (this->pd()->has_zero_dim_memory()) return;
 
-    data_t* variance = conf_.stats_is_src() ?
-        const_cast<data_t*>(reinterpret_cast<const data_t*>(
-                this->input_memory(2))) :
-        reinterpret_cast<data_t*>(this->memory(2));
+    auto src = CTX_IN_MEM(const data_t *, MKLDNN_ARG_SRC);
+    auto scaleshift = CTX_IN_MEM(const float *, MKLDNN_ARG_SCALE_SHIFT);
 
-    auto idx_scaleshift = 1 + 2*conf_.stats_is_src();
-    auto scaleshift =
-        reinterpret_cast<const data_t *>(this->input_memory(idx_scaleshift));
+    auto mean = pd()->stats_is_src()
+        ? const_cast<float *>(CTX_IN_MEM(const float *, MKLDNN_ARG_MEAN))
+        : CTX_OUT_MEM(float *, MKLDNN_ARG_MEAN);
+    auto variance = pd()->stats_is_src()
+        ? const_cast<float *>(CTX_IN_MEM(const float *, MKLDNN_ARG_VARIANCE))
+        : CTX_OUT_MEM(float *, MKLDNN_ARG_VARIANCE);
 
-    auto dst = reinterpret_cast<data_t*>(this->memory(0));
+    auto dst = CTX_OUT_MEM(data_t *, MKLDNN_ARG_DST);
+    auto ws = CTX_OUT_MEM(uint8_t *, MKLDNN_ARG_WORKSPACE);
 
-    const memory_desc_wrapper data_d(conf_.src_pd());
-    const memory_desc_wrapper scaleshift_d(conf_.weights_pd());
+    const memory_desc_wrapper data_d(pd()->src_md());
+    const memory_desc_wrapper scaleshift_d(pd()->weights_md());
 
-    const int N = conf_.MB();
-    const int C = conf_.C();
-    const int H = conf_.H();
-    const int W = conf_.W();
+    const dim_t N = pd()->MB();
+    const dim_t C = pd()->C();
+    dim_t H = 1, W = 1, D = 1;
+    const bool has_spatial = utils::one_of(data_d.ndims(), 4, 5);
+    if (has_spatial) {
+        D = pd()->D();
+        H = pd()->H();
+        W = pd()->W();
+    }
 
-    const float eps = conf_.desc()->batch_norm_epsilon;
-    const bool use_scaleshift = conf_.use_scaleshift();;
-    const bool save_stats = conf_.is_training();
-    const bool calculate_stats = !conf_.stats_is_src();
+    const float eps = pd()->desc()->batch_norm_epsilon;
+    const bool use_scaleshift = pd()->use_scaleshift();;
+    const bool save_stats = pd()->is_training();
+    const bool is_training = pd()->is_training();
+    const bool fuse_bn_relu = pd()->fuse_bn_relu();
+    const bool calculate_stats = !pd()->stats_is_src();
 
-    const bool with_relu = conf_.with_relu_post_op();
-    auto maybe_post_op = [&](data_t res) {
-        return (with_relu && res < 0) ? 0 : res;
+    const bool with_relu = pd()->with_relu_post_op();
+    auto maybe_post_op = [&](float res) {
+        return (with_relu && res < 0.0f) ? 0.0f : res;
+    };
+    const bool is_3d = data_d.ndims() == 5;
+
+    auto data_offset = [&](const memory_desc_wrapper &data_d, dim_t n, dim_t c,
+            dim_t d, dim_t h, dim_t w) {
+        if (has_spatial) {
+            if (is_3d)
+                return data_d.off(n, c, d, h, w);
+            else
+                return data_d.off(n, c, h, w);
+        } else
+            return data_d.off(n, c);
     };
 
-#   pragma omp parallel for schedule(static)
-    for (int c = 0; c < C; ++c) {
-        data_t v_mean = calculate_stats ? 0 : mean[c];
-        data_t v_variance = calculate_stats ? 0 : variance[c];
-
-        data_t sm = use_scaleshift ? scaleshift[scaleshift_d.off(0, c)] : 1;
-        data_t sv = use_scaleshift ? scaleshift[scaleshift_d.off(1, c)] : 0;
+    parallel_nd(C, [&](dim_t c) {
+        float v_mean = calculate_stats ? 0 : mean[c];
+        float v_variance = calculate_stats ? 0 : variance[c];
 
         if (calculate_stats) {
-            for (int n = 0; n < N; ++n)
-            for (int h = 0; h < H; ++h)
-            for (int w = 0; w < W; ++w)
-                v_mean += src[data_d.off(n, c, h, w)];
-            v_mean /= W*N*H;
+            for (dim_t n = 0; n < N; ++n)
+            for (dim_t d = 0; d < D; ++d)
+            for (dim_t h = 0; h < H; ++h)
+            for (dim_t w = 0; w < W; ++w)
+                v_mean += src[data_offset(data_d, n, c, d, h, w)];
+            v_mean /= W*N*H*D;
 
-            for (int n = 0; n < N; ++n)
-            for (int h = 0; h < H; ++h)
-            for (int w = 0; w < W; ++w) {
-                data_t m = src[data_d.off(n,c,h,w)] - v_mean;
+            for (dim_t n = 0; n < N; ++n)
+            for (dim_t d = 0; d < D; ++d)
+            for (dim_t h = 0; h < H; ++h)
+            for (dim_t w = 0; w < W; ++w) {
+                float m = src[data_offset(data_d, n, c, d, h, w)] - v_mean;
                 v_variance += m*m;
             }
-            v_variance /= W*H*N;
+            v_variance /= W*H*N*D;
         }
-        data_t sqrt_variance =
-            static_cast<data_t>(1. / sqrt(v_variance + eps));
 
-        for (int n = 0; n < N; ++n)
-        for (int h = 0; h < H; ++h)
-        for (int w = 0; w < W; ++w) {
-            auto d_off = data_d.off(n,c,h,w);
-            data_t bn_res = sm * (src[d_off] - v_mean) * sqrt_variance + sv;
-            dst[d_off] = maybe_post_op(bn_res);
+        float sqrt_variance = sqrtf(v_variance + eps);
+        float sm = (use_scaleshift
+            ? scaleshift[scaleshift_d.off(0, c)]
+            : 1.0f) / sqrt_variance;
+        float sv = use_scaleshift ? scaleshift[scaleshift_d.off(1, c)] : 0;
+
+        for (dim_t n = 0; n < N; ++n)
+        for (dim_t d = 0; d < D; ++d)
+        for (dim_t h = 0; h < H; ++h)
+        for (dim_t w = 0; w < W; ++w) {
+            auto d_off = data_offset(data_d,n,c,d,h,w);
+            float bn_res = sm * ((float)src[d_off] - v_mean) + sv;
+            if (fuse_bn_relu) {
+                if (bn_res <= 0) {
+                    bn_res = 0;
+                    if (is_training)
+                        ws[d_off] = 0;
+                } else {
+                    if (is_training)
+                        ws[d_off] = 1;
+                }
+            }
+            if (data_type == data_type::s8) {
+                dst[d_off] = qz_a1b0<float, data_t>()(maybe_post_op(bn_res));
+            } else {
+                dst[d_off] = static_cast<data_t>(maybe_post_op(bn_res));
+            }
         }
 
         if (calculate_stats) {
@@ -104,55 +141,91 @@ void ref_batch_normalization_fwd_t<data_type>::execute_forward() {
                 variance[c] = v_variance;
             }
         }
-    }
+    });
 }
 
 template struct ref_batch_normalization_fwd_t<data_type::f32>;
+template struct ref_batch_normalization_fwd_t<data_type::s8>;
 
 template <impl::data_type_t data_type>
-void ref_batch_normalization_bwd_t<data_type>::execute_backward() {
-    auto src = reinterpret_cast<const data_t *>(this->input_memory(0));
-    auto mean = reinterpret_cast<const data_t *>(this->input_memory(1));
-    auto variance = reinterpret_cast<const data_t *>(this->input_memory(2));
-    auto diff_dst = reinterpret_cast<const data_t *>(this->input_memory(3));
-    auto scaleshift = reinterpret_cast<const data_t *>(this->input_memory(4));
-    auto diff_src = reinterpret_cast<data_t*>(this->memory(0));
-    auto diff_scaleshift = reinterpret_cast<data_t *>(this->memory(1));
+void ref_batch_normalization_bwd_t<data_type>::execute_backward(
+        const exec_ctx_t &ctx) const {
+    auto src = CTX_IN_MEM(const data_t *, MKLDNN_ARG_SRC);
+    auto mean = CTX_IN_MEM(const data_t *, MKLDNN_ARG_MEAN);
+    auto variance = CTX_IN_MEM(const data_t *, MKLDNN_ARG_VARIANCE);
+    auto diff_dst = CTX_IN_MEM(const data_t *, MKLDNN_ARG_DIFF_DST);
+    auto scaleshift = CTX_IN_MEM(const data_t *, MKLDNN_ARG_SCALE_SHIFT);
+    auto ws = CTX_IN_MEM(const uint8_t *, MKLDNN_ARG_WORKSPACE);
 
-    const memory_desc_wrapper data_d(conf_.src_pd());
-    const memory_desc_wrapper diff_data_d(conf_.diff_src_pd());
-    const memory_desc_wrapper scaleshift_d(conf_.weights_pd());
-    const memory_desc_wrapper diff_scaleshift_d(conf_.diff_weights_pd());
-    const memory_desc_wrapper mean_d(conf_.mean_pd());
-    const memory_desc_wrapper variance_d(conf_.variance_pd());
+    auto diff_src = CTX_OUT_MEM(data_t *, MKLDNN_ARG_DIFF_SRC);
+    auto diff_scaleshift = CTX_OUT_MEM(data_t *, MKLDNN_ARG_DIFF_SCALE_SHIFT);
 
-    const int N = conf_.MB();
-    const int C = conf_.C();
-    const int H = conf_.H();
-    const int W = conf_.W();
+    const memory_desc_wrapper data_d(pd()->src_md());
+    const memory_desc_wrapper diff_data_d(pd()->diff_src_md());
+    const memory_desc_wrapper scaleshift_d(pd()->weights_md());
+    const memory_desc_wrapper diff_scaleshift_d(pd()->diff_weights_md());
 
-    const float eps = conf_.desc()->batch_norm_epsilon;
-    const bool use_scaleshift = conf_.use_scaleshift();
-    const bool calculate_diff_stats = !conf_.omit_stats();
+    const dim_t C = pd()->C();
 
+    /* fast return */
+    if (this->pd()->has_zero_dim_memory()) {
+        if (diff_scaleshift) {
+            for (dim_t c = 0; c < C; ++c) {
+                diff_scaleshift[diff_scaleshift_d.off(0, c)] = 0;
+                diff_scaleshift[diff_scaleshift_d.off(1, c)] = 0;
+            }
+        }
+        return;
+    }
 
-#   pragma omp parallel for schedule(static)
-    for (int c = 0; c < C; ++c) {
-        data_t v_mean = mean[mean_d.off(c)];
-        data_t v_variance = variance[variance_d.off(c)];
-        data_t sqrt_variance = static_cast<data_t>(1. / sqrt(v_variance + eps));
+    const dim_t N = pd()->MB();
+    dim_t H = 1, W = 1, D = 1;
+    const bool has_spatial = utils::one_of(data_d.ndims(), 4, 5);
+    if (has_spatial) {
+        D = pd()->D();
+        H = pd()->H();
+        W = pd()->W();
+    }
+
+    const float eps = pd()->desc()->batch_norm_epsilon;
+    const bool use_scaleshift = pd()->use_scaleshift();
+    const bool calculate_diff_stats = !pd()->use_global_stats();
+    const bool fuse_bn_relu = pd()->fuse_bn_relu();
+
+    const bool is_3d = data_d.ndims() == 5;
+
+    auto data_offset = [&](const memory_desc_wrapper &data_d, dim_t n, dim_t c,
+            dim_t d, dim_t h, dim_t w) {
+        if (has_spatial) {
+            if (is_3d)
+                return data_d.off(n, c, d, h, w);
+            else
+                return data_d.off(n, c, h, w);
+        } else
+            return data_d.off(n, c);
+    };
+
+    parallel_nd(C, [&](dim_t c) {
+        data_t v_mean = mean[c];
+        data_t v_variance = variance[c];
+        data_t sqrt_variance = static_cast<data_t>(1.0f / sqrtf(v_variance + eps));
         data_t gamma = use_scaleshift ? scaleshift[scaleshift_d.off(0, c)] : 1;
         data_t diff_gamma = data_t(0);
         data_t diff_beta = data_t(0);
         diff_gamma = 0.0;
         diff_beta = 0.0;
 
-        for (int n = 0; n < N; ++n)
-        for (int h = 0; h < H; ++h)
-        for (int w = 0; w < W; ++w) {
-            diff_gamma += (src[data_d.off(n, c, h, w)] - v_mean)
-                * diff_dst[diff_data_d.off(n, c, h, w)];
-            diff_beta += diff_dst[diff_data_d.off(n, c, h, w)];
+        for (dim_t n = 0; n < N; ++n)
+        for (dim_t d = 0; d < D; ++d)
+        for (dim_t h = 0; h < H; ++h)
+        for (dim_t w = 0; w < W; ++w) {
+            const size_t s_off = data_offset(data_d, n, c, d, h, w);
+            data_t dd = diff_dst[data_offset(diff_data_d, n, c, d, h, w)];
+            if (fuse_bn_relu && !ws[s_off])
+                dd = 0;
+
+            diff_gamma += (src[s_off] - v_mean) * dd;
+            diff_beta += dd;
         }
         diff_gamma *= sqrt_variance;
 
@@ -161,19 +234,26 @@ void ref_batch_normalization_bwd_t<data_type>::execute_backward() {
             diff_scaleshift[diff_scaleshift_d.off(1, c)] = diff_beta;
         }
 
-        for (int n = 0; n < N; ++n)
-        for (int h = 0; h < H; ++h)
-        for (int w = 0; w < W; ++w) {
-            data_t v_diff_src = diff_dst[diff_data_d.off(n, c, h, w)];
+        for (dim_t n = 0; n < N; ++n)
+        for (dim_t d = 0; d < D; ++d)
+        for (dim_t h = 0; h < H; ++h)
+        for (dim_t w = 0; w < W; ++w) {
+            const size_t s_off = data_offset(data_d, n, c, d, h, w);
+            const size_t dd_off = data_offset(diff_data_d, n, c, d, h, w);
+            data_t dd = diff_dst[dd_off];
+            if (fuse_bn_relu && !ws[s_off])
+                dd = 0;
+
+            data_t v_diff_src = dd;
             if (calculate_diff_stats) {
-                v_diff_src -= diff_beta/(W*H*N) +
-                    (src[data_d.off(n, c, h, w)] - v_mean) *
-                    diff_gamma*sqrt_variance/(W*H*N);
+                v_diff_src -= diff_beta/(D*W*H*N) +
+                    (src[s_off] - v_mean) *
+                    diff_gamma*sqrt_variance/(D*W*H*N);
             }
             v_diff_src *= gamma*sqrt_variance;
-            diff_src[diff_data_d.off(n, c, h, w)] = v_diff_src;
+            diff_src[dd_off] = v_diff_src;
         }
-    }
+    });
 }
 
 template struct ref_batch_normalization_bwd_t<data_type::f32>;

@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2016-2017 Intel Corporation
+# Copyright 2016-2018 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #===============================================================================
+
 # Locates Doxygen and configures documentation generation
 #===============================================================================
 
@@ -34,11 +35,11 @@ if(DOXYGEN_FOUND)
         ${CMAKE_CURRENT_BINARY_DIR}/header.html
         @ONLY)
     file(GLOB_RECURSE HEADERS
-        ${CMAKE_SOURCE_DIR}/include/*.h
-        ${CMAKE_SOURCE_DIR}/include/*.hpp
+        ${PROJECT_SOURCE_DIR}/include/*.h
+        ${PROJECT_SOURCE_DIR}/include/*.hpp
         )
     file(GLOB_RECURSE DOX
-        ${CMAKE_SOURCE_DIR}/doc/*
+        ${PROJECT_SOURCE_DIR}/doc/*
         )
     add_custom_command(
         OUTPUT ${DOXYGEN_STAMP_FILE}

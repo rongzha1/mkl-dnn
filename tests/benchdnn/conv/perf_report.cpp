@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@
 #include "mkldnn.h"
 #include "mkldnn_memory.hpp"
 
-#include "conv/conv.hpp"
+#include "conv/conv_common.hpp"
 
 namespace conv {
 
@@ -112,9 +112,14 @@ void perf_report(const prb_t *p, const res_t *r, const char *pstr) {
 
         if (c == 'd') DPRINT("%s", pstr);
         else if (c == 'D')
-            DPRINT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", p->g, p->mb,
-                    p->ic, p->ih, p->iw, p->oc, p->oh, p->ow, p->kh, p->kw,
-                    p->sh, p->sw, p->ph, p->pw);
+            DPRINT("" IFMT "," IFMT ","
+                    IFMT "," IFMT "," IFMT ","
+                    IFMT "," IFMT "," IFMT ","
+                    IFMT "," IFMT "," IFMT "," IFMT "," IFMT "," IFMT "",
+                    p->g, p->mb,
+                    p->ic, p->ih, p->iw,
+                    p->oc, p->oh, p->ow,
+                    p->kh, p->kw, p->sh, p->sw, p->ph, p->pw);
         else if (c == 'n')
             DPRINT("%s", p->name);
         else if (c == 'z')

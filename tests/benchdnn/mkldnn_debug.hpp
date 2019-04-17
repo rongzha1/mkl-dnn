@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -26,12 +26,8 @@ const char *status2str(mkldnn_status_t status);
 const char *dt2str(mkldnn_data_type_t dt);
 mkldnn_data_type_t str2dt(const char *str);
 
-/* round mode */
-const char *rmode2str(mkldnn_round_mode_t rmode);
-mkldnn_round_mode_t str2rmode(const char *str);
-
 /* format */
-const char *fmt2str(mkldnn_memory_format_t fmt);
-mkldnn_memory_format_t str2fmt(const char *str);
+const char *tag2str(mkldnn_format_tag_t tag);
+mkldnn_format_tag_t str2tag(const char *str);
 
 #endif

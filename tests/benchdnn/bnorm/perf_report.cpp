@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -37,8 +37,9 @@ See modifiers at the same place.
 | %D            | expanded problem descriptor (parameters in csv format)
 | %n            | problem name
 | %z            | direction
+| %F            | flags
 | %q            | data type (precision)
-| %f            | data format (layout)
+| %f            | data format tag (layout)
 | %@t           | time in ms
 
 The definition of expanded problem descriptor is: `mb,ic,ih,iw,eps`.
@@ -93,15 +94,18 @@ void perf_report(const prb_t *p, const res_t *r, const char *pstr) {
         if (c == 'd')
             DPRINT("%s", pstr);
         else if (c == 'D')
-            DPRINT("%d,%d,%d,%d,%g", p->mb, p->ic, p->ih, p->iw, p->eps);
+            DPRINT("" IFMT "," IFMT "," IFMT "," IFMT "," IFMT ",%g",
+                    p->mb, p->ic, p->id, p->ih, p->iw, p->eps);
         else if (c == 'n')
             DPRINT("%s", p->name);
         else if (c == 'z')
             DPRINT("%s", dir2str(p->dir));
+        else if (c == 'F')
+            DPRINT("%s", flags2str(p->flags));
         else if (c == 'q')
             DPRINT("%s", dt2str(p->dt));
         else if (c == 'f')
-            DPRINT("%s", fmt2str(p->fmt));
+            DPRINT("%s", tag2str(p->tag));
         else if (c == 't')
             DPRINT("%g", t.ms(mode) / unit);
         else

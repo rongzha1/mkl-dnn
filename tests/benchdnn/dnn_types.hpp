@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -44,17 +44,20 @@ typedef int data_kind_t;
 enum {
     SRC = 0, WEI, BIA, DST, ACC,
     DATA, MEAN, VAR, SS,
+    GWEI,
     DAT_TOTAL };
 const char *data_kind2str(data_kind_t kind);
 
 struct attr_t {
-    enum round_mode_t {
-        NEAREST = (int)mkldnn_round_nearest,
-        DOWN = (int)mkldnn_round_down,
-    };
-
     struct scale_t {
-        enum policy_t { NONE = 0, COMMON, PER_OC, POLICY_TOTAL };
+        enum policy_t { NONE = 0, COMMON, PER_OC,
+            // reorder section
+            // XXX: order is important, from longer name to a shorter one
+            // TODO: generalize, use numbers instead of predefined enum
+            PER_DIM_01,
+            PER_DIM_0, PER_DIM_1,
+            // reorder section ends
+            POLICY_TOTAL };
         static policy_t str2policy(const char *str);
         static const char *policy2str(policy_t policy);
 
@@ -68,17 +71,19 @@ struct attr_t {
     };
 
     struct post_ops_t {
-        enum kind_t { SUM, RELU, KIND_TOTAL };
+        enum kind_t { SUM, RELU, TANH, ELU, SQUARE, ABS, SQRT, LINEAR, BRELU,
+            SRELU, LOGISTIC, KIND_TOTAL };
         static kind_t str2kind(const char *str);
         static const char *kind2str(kind_t kind);
+        static mkldnn_alg_kind_t kind2mkldnn_kind(kind_t kind);
 
         struct entry_t {
             kind_t kind;
             union {
                 struct { float scale; } sum;
                 struct {
-                    // eltwise algorithm in future
-                    float scale, alpha, beta; // unused now
+                    mkldnn_alg_kind_t alg;
+                    float scale, alpha, beta;
                 } eltwise;
             };
         };
@@ -95,7 +100,6 @@ struct attr_t {
         entry_t entry[4];
     };
 
-    round_mode_t irmode = NEAREST;
     scale_t oscale;
     post_ops_t post_ops;
 
@@ -106,10 +110,11 @@ const size_t max_attr_len = 128;
 int str2attr(attr_t *attr, const char *str);
 void attr2str(const attr_t *attr, char *buffer);
 
-mkldnn_primitive_attr_t create_mkldnn_attr(const attr_t &attr, int scale_cnt,
-        int scale_mask, const float *scales);
+mkldnn_format_tag_t get_default_tag(int ndims);
+mkldnn_primitive_attr_t create_mkldnn_attr(const attr_t &attr,
+        int64_t scale_cnt, int scale_mask, const float *scales);
 inline mkldnn_primitive_attr_t create_mkldnn_attr(const attr_t &attr,
-        int scale_cnt, const float *scales)
+        int64_t scale_cnt, const float *scales)
 { return create_mkldnn_attr(attr, scale_cnt, -1, scales); }
 
 #endif

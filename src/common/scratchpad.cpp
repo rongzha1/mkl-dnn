@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,6 +13,9 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *******************************************************************************/
+
+#include "mkldnn_thread.hpp"
+#include "utils.hpp"
 
 #include "scratchpad.hpp"
 
@@ -76,15 +79,14 @@ struct global_scratchpad_t : public scratchpad_t {
     }
 
 private:
-    static char *scratchpad_;
-    static size_t size_;
-    static unsigned int reference_count_;
-#pragma omp threadprivate(scratchpad_, size_, reference_count_)
+    thread_local static char *scratchpad_;
+    thread_local static size_t size_;
+    thread_local static unsigned int reference_count_;
 };
 
-char *global_scratchpad_t::scratchpad_ = nullptr;
-size_t global_scratchpad_t::size_ = 0;
-unsigned int global_scratchpad_t::reference_count_ = 0;
+thread_local char *global_scratchpad_t::scratchpad_ = nullptr;
+thread_local size_t global_scratchpad_t::size_ = 0;
+thread_local unsigned int global_scratchpad_t::reference_count_ = 0;
 
 
 /*

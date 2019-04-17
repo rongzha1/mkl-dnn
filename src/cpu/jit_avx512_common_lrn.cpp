@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,14 +14,14 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "mkldnn_types.h"
-
 #include "c_types_map.hpp"
-#include "jit_avx512_common_lrn.hpp"
-#include "jit_generator.hpp"
 #include "mkldnn_thread.hpp"
 #include "type_helpers.hpp"
 #include "utils.hpp"
+
+#include "jit_avx512_common_lrn.hpp"
+
+#include "jit_generator.hpp"
 
 #define FWD_RBC 4
 #define BWD_RBC 3
@@ -41,7 +41,6 @@ namespace impl {
 namespace cpu {
 
 using namespace mkldnn::impl::status;
-using namespace mkldnn::impl::memory_format;
 using namespace mkldnn::impl::utils;
 
 using namespace Xbyak;
@@ -109,6 +108,8 @@ struct jit_avx512_common_lrn_fwd_t::jit_avx512_common_lrn_kernel_f32:
     int use_h_parallelism;
 
     float alpha, k;
+
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_avx512_common_lrn_kernel_f32)
 
     void (*ker)(jit_args_fwd_t *);
     void operator()(jit_args_fwd_t *arg) { ker(arg); }
@@ -261,13 +262,11 @@ struct jit_avx512_common_lrn_fwd_t::jit_avx512_common_lrn_kernel_f32:
         movq(xk, imm_addr64);
         vbroadcastss(zk, xk);
 
-        char tag = '\0';
         if (is_first || is_single) {
             vxorps(xmm2, xmm2, xmm2);
             for(int irb = 0; irb < FWD_RBC; irb++) {
                 vmovups(ptr[t + irb*BUFFER_BLOCK], xmm2);
             }
-            tag = 'f';
         }
         if (is_last || is_single) {
             vxorps(xmm2, xmm2, xmm2);
@@ -275,13 +274,12 @@ struct jit_avx512_common_lrn_fwd_t::jit_avx512_common_lrn_kernel_f32:
                 vmovups(ptr[t + irb*BUFFER_BLOCK + BUFFER_NEXT_OFFSET],
                     xmm2);
             }
-            tag = 'l';
         }
 
         int LSREST = LSB % FWD_RBC;
         int LS = LSB - LSREST;
 
-        jit_tagged_label lrn_loop("lrn_loop", tag);
+        Label lrn_loop;
 
         if (LS > 0) {
             mov(hw, LS);
@@ -319,50 +317,45 @@ status_t jit_avx512_common_lrn_fwd_t::pd_t::init() {
     using namespace prop_kind;
     using namespace alg_kind;
 
-    assert(engine()->kind() == engine_kind::cpu);
-
-    if (!mayiuse(avx512_common)) return unimplemented;
-
-    const memory_desc_wrapper data_d(data_pd_.desc());
+    const memory_desc_wrapper data_d(src_md());
     bool ok = true
-        && one_of(desc()->prop_kind, forward_training, forward_inference)
-        && everyone_is(data_type::f32, desc()->data_desc.data_type)
+        && mayiuse(avx512_common)
+        && is_fwd()
+        && !has_zero_dim_memory()
+        && everyone_is(data_type::f32, data_d.data_type())
         && data_d.ndims() == 4
         && data_d.dims()[1] % vsize == 0
         && attr()->has_default_values();
     if (!ok) return unimplemented;
 
     if (desc()->prop_kind == forward_training) {
-        memory_desc_t ws_d;
         dims_t ws_dims = { MB(), C(), H(), 2*W() };
-        mkldnn_memory_desc_init(&ws_d, 4, ws_dims, data_type::f32,
-            memory_format::nChw16c);
-        ws_pd_ = cpu_memory_t::pd_t(engine_, &ws_d);
+        mkldnn_memory_desc_init_by_tag(&ws_md_, 4, ws_dims, data_type::f32,
+                format_tag::nChw16c);
     }
 
     bool args_ok_across = true
         && desc()->alg_kind == lrn_across_channels
         && desc()->local_size == 5
         && desc()->lrn_beta == 0.75
-        && data_d.format() == nChw16c;
+        && data_d.matches_tag(format_tag::nChw16c);
 
     return args_ok_across ? success : unimplemented;
 }
 
-jit_avx512_common_lrn_fwd_t::jit_avx512_common_lrn_fwd_t(const pd_t *pd,
-        const input_vector &inputs, const output_vector &outputs)
-    : cpu_primitive_t(&conf_, inputs, outputs), conf_(*pd)
+jit_avx512_common_lrn_fwd_t::jit_avx512_common_lrn_fwd_t(const pd_t *apd)
+    : cpu_primitive_t(apd)
     , use_h_parallelism(0), ker_(nullptr), ker_first_(nullptr)
     , ker_last_(nullptr) {
     using namespace alg_kind;
-    const int C = conf_.C();
-    const int H = conf_.H();
-    const int W = conf_.W();
-    const int ls = conf_.desc()->local_size;
-    const float alpha = conf_.desc()->lrn_alpha / ls;
-    const float k = conf_.desc()->lrn_k;
+    const int C = pd()->C();
+    const int H = pd()->H();
+    const int W = pd()->W();
+    const int ls = pd()->desc()->local_size;
+    const float alpha = pd()->desc()->lrn_alpha / ls;
+    const float k = pd()->desc()->lrn_k;
 
-    auto pk = conf_.desc()->prop_kind;
+    auto pk = pd()->desc()->prop_kind;
 
     use_h_parallelism = H > 28 ? 1 : 0;
 
@@ -382,17 +375,18 @@ jit_avx512_common_lrn_fwd_t::jit_avx512_common_lrn_fwd_t(const pd_t *pd,
 jit_avx512_common_lrn_fwd_t::~jit_avx512_common_lrn_fwd_t()
 { delete ker_; delete ker_first_; delete ker_last_; }
 
-void jit_avx512_common_lrn_fwd_t::execute_forward() {
-    auto src = reinterpret_cast<const data_t *>(this->input_memory(0));
-    auto dst = reinterpret_cast<data_t*>(this->memory(0));
-    auto ws = reinterpret_cast<data_t*>(this->memory(1));
+void jit_avx512_common_lrn_fwd_t::execute_forward(const exec_ctx_t &ctx) const
+{
+    auto src = CTX_IN_MEM(const data_t *, MKLDNN_ARG_SRC);
+    auto dst = CTX_OUT_MEM(data_t *, MKLDNN_ARG_DST);
+    auto ws = CTX_OUT_MEM(data_t *, MKLDNN_ARG_WORKSPACE);
 
-    const int N = conf_.MB();
-    const int C = conf_.C();
-    const int H = conf_.H();
-    const int W = conf_.W();
+    const int N = pd()->MB();
+    const int C = pd()->C();
+    const int H = pd()->H();
+    const int W = pd()->W();
 
-    auto ker = [&](const int ithr, const int nthr) {
+    parallel(0, [&](const int ithr, const int nthr) {
         size_t start{0}, end{0};
         const int C16 = C / vsize;
         const size_t work_amount = use_h_parallelism ? N*C16*H : N*C16;
@@ -450,12 +444,7 @@ void jit_avx512_common_lrn_fwd_t::execute_forward() {
                 nd_iterator_step(n, N, c16, C16);
             }
         }
-    };
-
-# pragma omp parallel
-    {
-        ker(omp_get_thread_num(), omp_get_num_threads());
-    }
+    });
 }
 
 struct jit_avx512_common_lrn_bwd_t::jit_avx512_common_lrn_kernel_f32:
@@ -499,6 +488,8 @@ struct jit_avx512_common_lrn_bwd_t::jit_avx512_common_lrn_kernel_f32:
     float nalphabeta;
 
     int use_h_parallelism;
+
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_avx512_common_lrn_kernel_f32)
 
     void (*ker)(jit_args_bwd_t *);
     void operator()(jit_args_bwd_t *arg) { ker(arg); }
@@ -629,9 +620,18 @@ struct jit_avx512_common_lrn_bwd_t::jit_avx512_common_lrn_kernel_f32:
                  zreg(irb, zws0)));
         IRB_LOOP(vfmadd213ps(zreg(irb, zdiffsrc), zreg(irb, zsrc),
                  zreg(irb, zdiffdst)));
-        IRB_LOOP(vmovntps(EVEX_compress_addr(diffsrc, irb*vlen),
-                 zreg(irb, zdiffsrc)));
 
+        Label unaligned_store, end_store;
+        test(diffsrc, vlen - 1);
+        jnz(unaligned_store, T_NEAR);
+        IRB_LOOP(uni_vmovntps(EVEX_compress_addr(diffsrc, irb*vlen),
+                 zreg(irb, zdiffsrc)));
+        jmp(end_store, T_NEAR);
+        L(unaligned_store); {
+            IRB_LOOP(uni_vmovups(EVEX_compress_addr(diffsrc, irb*vlen),
+                     zreg(irb, zdiffsrc)));
+        }
+        L(end_store);
     }
 
     jit_avx512_common_lrn_kernel_f32(
@@ -666,26 +666,23 @@ struct jit_avx512_common_lrn_bwd_t::jit_avx512_common_lrn_kernel_f32:
         is_last  = J.version == +1 || J.version == +2;
         is_single = J.version == 3;
 
-        char tag = '\0';
         if (is_first || is_single) {
             vxorps(xmm1, xmm1, xmm1);
             for(int irb = 0; irb < BWD_RBC; irb++) {
                 vmovups(ptr[t + irb*BUFFER_BLOCK], xmm1);
             }
-            tag = 'f';
         }
         if (is_last || is_single) {
             vxorps(xmm1, xmm1, xmm1);
             for(int irb = 0; irb < BWD_RBC; irb++) {
                 vmovups(ptr[t + irb*BUFFER_BLOCK + BUFFER_NEXT_OFFSET], xmm1);
             }
-            tag = 'l';
         }
 
         int LSREST = LSB % BWD_RBC;
         int LS = LSB - LSREST;
 
-        jit_tagged_label lrn_loop("lrn_loop", tag);
+        Label lrn_loop;
 
         if (LS > 0) {
             mov(hw, LS);
@@ -719,55 +716,44 @@ struct jit_avx512_common_lrn_bwd_t::jit_avx512_common_lrn_kernel_f32:
 };
 
 status_t jit_avx512_common_lrn_bwd_t::pd_t::init() {
-    using namespace prop_kind;
     using namespace alg_kind;
 
-    assert(engine()->kind() == engine_kind::cpu);
-
-    if (!mayiuse(avx512_common)) return unimplemented;
-
-    const memory_desc_wrapper data_d(data_pd_.desc());
+    const memory_desc_wrapper data_d(src_md());
     bool ok = true
-        && utils::one_of(desc()->prop_kind, backward, backward_data)
-        && utils::everyone_is(data_type::f32, desc()->data_desc.data_type)
+        && mayiuse(avx512_common)
+        && !is_fwd()
+        && utils::everyone_is(data_type::f32, data_d.data_type())
+        && !has_zero_dim_memory()
         && data_d.ndims() == 4
         && data_d.dims()[1] % vsize == 0
         && attr()->has_default_values();
     if (!ok) return unimplemented;
 
-    memory_desc_t ws_d;
     dims_t ws_dims = { MB(), C(), H(), 2*W() };
-    mkldnn_memory_desc_init(&ws_d, 4, ws_dims, data_type::f32,
-        memory_format::nChw16c);
-    ws_pd_ = cpu_memory_t::pd_t(engine_, &ws_d);
+    mkldnn_memory_desc_init_by_tag(&ws_md_, 4, ws_dims, data_type::f32,
+            format_tag::nChw16c);
 
-    auto fwd_ws_d_ = hint_fwd_pd_->workspace_pd()->desc();
-    bool ws_ok = true
-        && fwd_ws_d_->ndims == ws_pd_.desc()->ndims
-        && fwd_ws_d_->format == ws_pd_.desc()->format
-        && fwd_ws_d_->data_type == ws_pd_.desc()->data_type;
-    if (!ws_ok) return unimplemented;
+    if (!compare_ws(hint_fwd_pd_)) return unimplemented;
 
     bool args_ok_across = true
         && desc()->alg_kind == lrn_across_channels
         && desc()->local_size == 5
         && desc()->lrn_beta == 0.75
-        && data_d.format() == nChw16c;
+        && data_d.matches_tag(format_tag::nChw16c);
 
     return args_ok_across ? success : unimplemented;
 }
 
-jit_avx512_common_lrn_bwd_t::jit_avx512_common_lrn_bwd_t(const pd_t *pd,
-        const input_vector &inputs, const output_vector &outputs)
-    : cpu_primitive_t(&conf_, inputs, outputs), conf_(*pd)
+jit_avx512_common_lrn_bwd_t::jit_avx512_common_lrn_bwd_t(const pd_t *apd)
+    : cpu_primitive_t(apd)
     , use_h_parallelism(0),  ker_(nullptr), ker_first_(nullptr)
     , ker_last_(nullptr) {
-    const int C = conf_.C();
-    const int H = conf_.H();
-    const int W = conf_.W();
-    const int ls = conf_.desc()->local_size;
-    const float alpha = conf_.desc()->lrn_alpha / ls;
-    const float beta = conf_.desc()->lrn_beta;
+    const int C = pd()->C();
+    const int H = pd()->H();
+    const int W = pd()->W();
+    const int ls = pd()->desc()->local_size;
+    const float alpha = pd()->desc()->lrn_alpha / ls;
+    const float beta = pd()->desc()->lrn_beta;
 
     use_h_parallelism = H > 28 ? 1 : 0;
 
@@ -787,18 +773,19 @@ jit_avx512_common_lrn_bwd_t::jit_avx512_common_lrn_bwd_t(const pd_t *pd,
 jit_avx512_common_lrn_bwd_t::~jit_avx512_common_lrn_bwd_t()
 { delete ker_; delete ker_first_; delete ker_last_; }
 
-void jit_avx512_common_lrn_bwd_t::execute_backward() {
-    auto src = reinterpret_cast<const data_t *>(this->input_memory(0));
-    auto diff_dst = reinterpret_cast<const data_t *>(this->input_memory(1));
-    auto ws = reinterpret_cast<const data_t *>(this->input_memory(2));
-    auto diff_src = reinterpret_cast<data_t *>(this->memory(0));
+void jit_avx512_common_lrn_bwd_t::execute_backward(const exec_ctx_t &ctx) const
+{
+    auto src = CTX_IN_MEM(const data_t *, MKLDNN_ARG_SRC);
+    auto diff_dst = CTX_IN_MEM(const data_t *, MKLDNN_ARG_DIFF_DST);
+    auto ws = CTX_IN_MEM(const data_t *, MKLDNN_ARG_WORKSPACE);
+    auto diff_src = CTX_OUT_MEM(data_t *, MKLDNN_ARG_DIFF_SRC);
 
-    const int N = conf_.MB();
-    const int C = conf_.C();
-    const int H = conf_.H();
-    const int W = conf_.W();
+    const int N = pd()->MB();
+    const int C = pd()->C();
+    const int H = pd()->H();
+    const int W = pd()->W();
 
-    auto ker = [&](const int ithr, const int nthr) {
+    parallel(0, [&](const int ithr, const int nthr) {
         size_t start{0}, end{0};
         const int C16 = C / vsize;
         const size_t work_amount = use_h_parallelism ? N*C16*H : N*C16;
@@ -858,12 +845,7 @@ void jit_avx512_common_lrn_bwd_t::execute_backward() {
                 nd_iterator_step(n, N, c16, C16);
             }
         }
-    };
-
-# pragma omp parallel
-    {
-        ker(omp_get_thread_num(), omp_get_num_threads());
-    }
+    });
 }
 
 }

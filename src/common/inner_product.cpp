@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2017 Intel Corporation
+* Copyright 2016-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ status_t ip_desc_init(inner_product_desc_t *ip_desc, prop_kind_t prop_kind,
     bool args_ok = !any_null(ip_desc, src_desc, weights_desc, dst_desc);
     if (!args_ok) return invalid_arguments;
 
-    inner_product_desc_t id = {};
+    auto id = inner_product_desc_t();
     id.primitive_kind = primitive_kind::inner_product;
     id.prop_kind = prop_kind;
 
@@ -44,7 +44,8 @@ status_t ip_desc_init(inner_product_desc_t *ip_desc, prop_kind_t prop_kind,
     id.diff_bias_desc = id.bias_desc = zero_md();
 
     const bool is_fwd = one_of(prop_kind, forward_training, forward_inference);
-    const bool with_bias = bias_desc && bias_desc->format != memory_format::undef;
+    const bool with_bias =
+        bias_desc && bias_desc->format_kind != format_kind::undef;
 
     (prop_kind == backward_data ? id.diff_src_desc : id.src_desc) = *src_desc;
     (is_fwd ? id.dst_desc : id.diff_dst_desc)  = *dst_desc;
@@ -57,9 +58,9 @@ status_t ip_desc_init(inner_product_desc_t *ip_desc, prop_kind_t prop_kind,
     id.accum_data_type = types::default_accum_data_type(src_desc->data_type,
             weights_desc->data_type, dst_desc->data_type, prop_kind);
 
-    /* FIXME: fill-in! */
     bool consistency = true
-        && one_of(src_desc->ndims, 2, 4)
+        && memory_desc_wrapper(weights_desc).nelems()
+        && one_of(src_desc->ndims, 2, 3, 4, 5)
         && dst_desc->ndims == 2
         && weights_desc->ndims == src_desc->ndims
         && (with_bias ? bias_desc->ndims == 1 : true)

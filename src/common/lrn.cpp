@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2017 Intel Corporation
+* Copyright 2016-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -32,15 +32,15 @@ namespace {
 status_t lrn_desc_init(lrn_desc_t *lrn_desc,
         prop_kind_t prop_kind, alg_kind_t alg_kind,
         const memory_desc_t *data_desc, const memory_desc_t *diff_data_desc,
-        int local_size, float alpha, float beta, float k) {
+        dim_t local_size, float alpha, float beta, float k) {
     bool args_ok = true
         && !any_null(lrn_desc, data_desc)
         && one_of(alg_kind, lrn_within_channel, lrn_across_channels)
         && one_of(prop_kind, forward_training, forward_inference, backward_data)
-        && implication(prop_kind == backward_data, diff_data_desc != nullptr);
+        && IMPLICATION(prop_kind == backward_data, diff_data_desc != nullptr);
     if (!args_ok) return invalid_arguments;
 
-    lrn_desc_t ld = {};
+    auto ld = lrn_desc_t();
     ld.primitive_kind = primitive_kind::lrn;
     ld.prop_kind = prop_kind;
     ld.alg_kind = alg_kind;
@@ -72,7 +72,7 @@ status_t lrn_desc_init(lrn_desc_t *lrn_desc,
 
 status_t mkldnn_lrn_forward_desc_init(lrn_desc_t *lrn_desc,
         prop_kind_t prop_kind, alg_kind_t alg_kind,
-        const memory_desc_t *data_desc, int local_size, float alpha,
+        const memory_desc_t *data_desc, dim_t local_size, float alpha,
         float beta, float k) {
     if (!one_of(prop_kind, forward_training, forward_inference))
         return invalid_arguments;
@@ -82,7 +82,7 @@ status_t mkldnn_lrn_forward_desc_init(lrn_desc_t *lrn_desc,
 
 status_t mkldnn_lrn_backward_desc_init(lrn_desc_t *lrn_desc,
         alg_kind_t alg_kind, const memory_desc_t *data_desc,
-        const memory_desc_t *diff_data_desc, int local_size, float alpha,
+        const memory_desc_t *diff_data_desc, dim_t local_size, float alpha,
         float beta, float k) {
     return lrn_desc_init(lrn_desc, backward_data, alg_kind, data_desc,
             diff_data_desc, local_size, alpha, beta, k);

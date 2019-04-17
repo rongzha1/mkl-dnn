@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017 Intel Corporation
+* Copyright 2017-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -36,11 +36,12 @@ const char* check_alg2str(check_alg_t alg);
 using flags_t = unsigned;
 const flags_t GLOB_STATS = mkldnn_use_global_stats;
 const flags_t USE_SCALESHIFT = mkldnn_use_scaleshift;
+const flags_t FUSE_BN_RELU = mkldnn_fuse_bn_relu;
 flags_t str2flags(const char *str);
 const char *flags2str(flags_t flags);
 
 struct desc_t {
-    int mb, ic, ih, iw;
+    int64_t mb, ic, id, ih, iw;
     float eps;
     const char *name;
 };
@@ -49,10 +50,10 @@ int str2desc(desc_t *desc, const char *str);
 void desc2str(const desc_t *d, char *buffer, bool canonical = false);
 
 struct prb_t: public desc_t {
-    prb_t(const desc_t &desc, int mb, dir_t dir, mkldnn_data_type_t dt,
-            mkldnn_memory_format_t fmt, flags_t flags, const attr_t &attr,
+    prb_t(const desc_t &desc, int64_t mb, dir_t dir, mkldnn_data_type_t dt,
+            mkldnn_format_tag_t tag, flags_t flags, const attr_t &attr,
             check_alg_t check_alg)
-        : desc_t(desc), check_alg(check_alg), dir(dir), dt(dt), fmt(fmt)
+        : desc_t(desc), check_alg(check_alg), dir(dir), dt(dt), tag(tag)
         , flags(flags), attr(attr)
     { if (mb) this->mb = mb; }
     ~prb_t() {}
@@ -61,7 +62,7 @@ struct prb_t: public desc_t {
 
     dir_t dir;
     mkldnn_data_type_t dt;
-    mkldnn_memory_format_t fmt;
+    mkldnn_format_tag_t tag;
     flags_t flags;
     attr_t attr;
 };
@@ -74,24 +75,37 @@ extern const char *skip_impl; /* NULL or "" means do not skip anything */
 extern const char *perf_template; /* performance output template */
 void perf_report(const prb_t *p, const res_t *r, const char *pstr);
 
-inline int data_off(const prb_t *p, int mb, int c, int h, int w) {
-    return ((mb * p->ic + c) * p->ih + h) * p->iw + w;
+inline size_t data_off(const prb_t *p,
+        int64_t mb, int64_t c, int64_t d, int64_t h, int64_t w) {
+    return (((mb * p->ic + c) * p->id + d) * p->ih + h) * p->iw + w;
 }
 
-inline void inv_data_off(const prb_t *p, size_t off, int &mb, int &c, int &h,
-        int &w) {
+inline void inv_data_off(const prb_t *p, size_t off,
+        int64_t &mb, int64_t &c, int64_t &d, int64_t &h, int64_t &w) {
     w = off % p->iw; off /= p->iw;
     h = off % p->ih; off /= p->ih;
+    d = off % p->id; off /= p->id;
     c = off % p->ic; off /= p->ic;
     mb = off % p->mb; off /= p->mb;
     assert(off == 0);
+}
+
+inline bool is_bnorm_3d(const prb_t *p)
+{
+    return (p->id > 1) ? 1 : 0;
+}
+
+inline float saturate_and_round(float value) {
+    // hard code for s8 data type
+    return MAX2(INT8_MIN, MIN2(INT8_MAX, mxcsr_round(value)));
 }
 
 void compute_ref_fwd(const prb_t *p, const dnn_mem_t &src, dnn_mem_t &mean,
         dnn_mem_t &var, const dnn_mem_t &ss, dnn_mem_t &dst);
 void compute_ref_bwd(const prb_t *p, const dnn_mem_t &src,
         const dnn_mem_t &mean, const dnn_mem_t &var, const dnn_mem_t &d_dst,
-        const dnn_mem_t &ss, dnn_mem_t &d_src, dnn_mem_t &d_ss);
+        const dnn_mem_t &ss, const dnn_mem_t &rmask, dnn_mem_t &d_src,
+        dnn_mem_t &d_ss);
 
 int doit(const prb_t *p, res_t *res);
 int bench(int argc, char **argv, bool main_bench = true);

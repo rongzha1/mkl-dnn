@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2017 Intel Corporation
+# Copyright 2017-2018 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #===============================================================================
+
 # Manage secure Development Lifecycle-related compiler flags
 #===============================================================================
 
@@ -20,30 +21,40 @@ if(SDL_cmake_included)
     return()
 endif()
 set(SDL_cmake_included true)
+include("cmake/utils.cmake")
 
-if(UNIX OR APPLE)
+if(UNIX)
     set(CMAKE_CCXX_FLAGS "-fPIC -Wformat -Wformat-security")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -D_FORTIFY_SOURCE=2")
-    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -D_FORTIFY_SOURCE=2")
+    append(CMAKE_CXX_FLAGS_RELEASE "-D_FORTIFY_SOURCE=2")
+    append(CMAKE_C_FLAGS_RELEASE "-D_FORTIFY_SOURCE=2")
     if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
         if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.9)
-            set(CMAKE_CCXX_FLAGS "${CMAKE_CCXX_FLAGS} -fstack-protector-all")
+            append(CMAKE_CCXX_FLAGS "-fstack-protector-all")
         else()
-            set(CMAKE_CCXX_FLAGS "${CMAKE_CCXX_FLAGS} -fstack-protector-strong")
+            append(CMAKE_CCXX_FLAGS "-fstack-protector-strong")
         endif()
+
+        # GCC might be very paranoid for partial structure initialization, e.g.
+        #   struct { int a, b; } s = { 0, };
+        # However the behavior is triggered by `Wmissing-field-initializers`
+        # only. To prevent warnings on users' side who use the library and turn
+        # this warning on, let's use it too. Applicable for the library sources
+        # and interfaces only (tests currently rely on that fact heavily)
+        append(CMAKE_SRC_CCXX_FLAGS "-Wmissing-field-initializers")
+        append(CMAKE_EXAMPLE_CCXX_FLAGS "-Wmissing-field-initializers")
     elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-        set(CMAKE_CCXX_FLAGS "${CMAKE_CCXX_FLAGS} -fstack-protector-all")
+        append(CMAKE_CCXX_FLAGS "-fstack-protector-all")
     elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Intel")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fstack-protector")
+        append(CMAKE_CXX_FLAGS "-fstack-protector")
     endif()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CMAKE_CCXX_FLAGS}")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_CCXX_FLAGS}")
+    append(CMAKE_C_FLAGS "${CMAKE_CCXX_FLAGS}")
+    append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_FLAGS}")
     if(APPLE)
-        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-bind_at_load")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-bind_at_load")
+        append(CMAKE_SHARED_LINKER_FLAGS "-Wl,-bind_at_load")
+        append(CMAKE_EXE_LINKER_FLAGS "-Wl,-bind_at_load")
     else()
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie")
-        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now")
+        append(CMAKE_EXE_LINKER_FLAGS "-pie")
+        append(CMAKE_SHARED_LINKER_FLAGS "-Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now")
+        append(CMAKE_EXE_LINKER_FLAGS "-Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now")
     endif()
 endif()

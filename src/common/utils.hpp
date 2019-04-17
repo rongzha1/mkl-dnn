@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2017 Intel Corporation
+* Copyright 2016-2018 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,17 +18,33 @@
 #define UTILS_HPP
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
-#ifdef WIN32
-#include <malloc.h>
+#include <stdint.h>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#define MKLDNN_X86_64
 #endif
+
+#define MSAN_ENABLED 0
+#if defined(__has_feature)
+#if __has_feature(memory_sanitizer)
+#undef MSAN_ENABLED
+#define MSAN_ENABLED 1
+#include <sanitizer/msan_interface.h>
+#endif
+#endif
+
+#include "c_types_map.hpp"
+#include "nstl.hpp"
+#include "z_magic.hpp"
 
 namespace mkldnn {
 namespace impl {
 
-#define UNUSED(x) ((void)x)
-#define MAYBE_UNUSED(x) UNUSED(x)
+// Sanity check for 64 bits
+static_assert(sizeof(void*) == 8, "Intel(R) MKL-DNN supports 64 bit only");
 
 #define CHECK(f) do { \
     status_t status = f; \
@@ -36,9 +52,7 @@ namespace impl {
     return status; \
 } while (0)
 
-#ifdef _WIN32
-#define __PRETTY_FUNCTION__ __FUNCSIG__
-#endif
+#define IMPLICATION(cause, effect) (!(cause) || !!(effect))
 
 namespace utils {
 
@@ -98,16 +112,14 @@ inline bool everyone_is(T val, P item, Args... item_others) {
 }
 
 template <typename T, typename P>
-inline bool one_of(T val, P item) { return val == item; }
+constexpr bool one_of(T val, P item) { return val == item; }
 template <typename T, typename P, typename... Args>
-inline bool one_of(T val, P item, Args... item_others) {
+constexpr bool one_of(T val, P item, Args... item_others) {
     return val == item || one_of(val, item_others...);
 }
 
 template <typename... Args>
 inline bool any_null(Args... ptrs) { return one_of(nullptr, ptrs...); }
-
-inline bool implication(bool cause, bool effect) { return !cause || effect; }
 
 template<typename T>
 inline void array_copy(T *dst, const T *src, size_t size) {
@@ -139,11 +151,36 @@ inline T array_product(const T *arr) {
     return product_impl::product_impl(arr, product_impl::int2type<num-1>());
 }
 
-template<typename T>
-inline T array_product(const T *arr, size_t size) {
-    T prod = 1;
+template<typename T, typename R = T>
+inline R array_product(const T *arr, size_t size) {
+    R prod = 1;
     for (size_t i = 0; i < size; ++i) prod *= arr[i];
     return prod;
+}
+
+/** sorts an array of values using @p comparator. While sorting the array
+ * of value, the function permutes an array of @p keys accordingly.
+ *
+ * @note The arrays of @p keys can be omitted. In this case the function
+ *       sorts the array of @vals only.
+ */
+template <typename T, typename U, typename F>
+inline void simultaneous_sort(T *vals, U *keys, size_t size, F comparator) {
+    if (size == 0) return;
+
+    for (size_t i = 0; i < size - 1; ++i) {
+        bool swapped = false;
+
+        for (size_t j = 0; j < size - i - 1; j++) {
+            if (comparator(vals[j], vals[j + 1]) > 0) {
+                nstl::swap(vals[j], vals[j + 1]);
+                if (keys) nstl::swap(keys[j], keys[j + 1]);
+                swapped = true;
+            }
+        }
+
+        if (swapped == false) break;
+    }
 }
 
 template <typename T, typename U>
@@ -161,6 +198,9 @@ template <typename T, typename U>
 inline typename remove_reference<T>::type rnd_dn(const T a, const U b) {
     return (a / b) * b;
 }
+
+template <typename T> T *align_ptr(T *ptr, uintptr_t alignment)
+{ return (T *)(((uintptr_t)ptr + alignment - 1) & ~(alignment - 1)); }
 
 template <typename T, typename U, typename V>
 inline U this_block_size(const T offset, const U max, const V block_size) {
@@ -219,43 +259,109 @@ inline bool nd_iterator_jump(U &cur, const U end, W &x, const Y &X,
     return false;
 }
 
+template <typename T>
+inline T pick(size_t i, const T &x0) { return x0; }
+template <typename T, typename ...Args>
+inline T pick(size_t i, const T &x0, Args &&... args) {
+    return i == 0 ? x0 : pick(i - 1, utils::forward<Args>(args)...);
 }
 
-inline void *malloc(size_t size, int alignment) {
-    void *ptr;
-
-#ifdef _WIN32
-    ptr = _aligned_malloc(size, alignment);
-    int rc = ptr ? 0 : -1;
-#else
-    int rc = ::posix_memalign(&ptr, alignment, size);
-#endif
-
-    return (rc == 0) ? ptr : 0;
-}
-
-inline void free(void *p) {
-#ifdef _WIN32
-    _aligned_free(p);
-#else
-    ::free(p);
-#endif
-}
-
-struct c_compatible {
-    enum { default_alignment = 64 };
-    static void *operator new(size_t sz) {
-        return malloc(sz, default_alignment);
+template <typename T>
+T pick_by_prop_kind(prop_kind_t prop_kind, const T &val_fwd_inference,
+        const T &val_fwd_training, const T &val_bwd_d, const T &val_bwd_w) {
+    switch (prop_kind) {
+    case prop_kind::forward_inference: return val_fwd_inference;
+    case prop_kind::forward_training: return val_fwd_training;
+    case prop_kind::backward_data: return val_bwd_d;
+    case prop_kind::backward_weights: return val_bwd_w;
+    default: assert(!"unsupported prop_kind");
     }
-    static void *operator new(size_t sz, void *p) { UNUSED(sz); return p; }
-    static void *operator new[](size_t sz) {
-        return malloc(sz, default_alignment);
+    return T();
+}
+
+template <typename T>
+T pick_by_prop_kind(prop_kind_t prop_kind,
+        const T &val_fwd, const T &val_bwd_d, const T &val_bwd_w)
+{ return pick_by_prop_kind(prop_kind, val_fwd, val_fwd, val_bwd_d, val_bwd_w); }
+
+template <typename Telem, size_t Tdims>
+struct array_offset_calculator {
+    template <typename... Targs>
+    array_offset_calculator(Telem *base, Targs... Fargs) : _dims{ Fargs... }
+    {
+        _base_ptr = base;
     }
-    static void operator delete(void *p) { free(p); }
-    static void operator delete[](void *p) { free(p); }
+    template <typename... Targs>
+    inline Telem &operator()(Targs... Fargs)
+    {
+        return *(_base_ptr + _offset(1, Fargs...));
+    }
+
+private:
+    template <typename... Targs>
+    inline size_t _offset(size_t const dimension, size_t element)
+    {
+        return element;
+    }
+
+    template <typename... Targs>
+    inline size_t _offset(size_t const dimension, size_t theta, size_t element)
+    {
+        return element + (_dims[dimension] * theta);
+    }
+
+    template <typename... Targs>
+    inline size_t _offset(size_t const dimension, size_t theta, size_t element,
+            Targs... Fargs)
+    {
+        size_t t_prime = element + (_dims[dimension] * theta);
+        return _offset(dimension + 1, t_prime, Fargs...);
+    }
+
+    Telem *_base_ptr;
+    const int _dims[Tdims];
 };
 
-inline void yield_thread() { }
+}
+
+int32_t fetch_and_add(int32_t *dst, int32_t val);
+inline void yield_thread() {}
+
+// Reads an environment variable 'name' and stores its string value in the
+// 'buffer' of 'buffer_size' bytes (including the terminating zero) on
+// success.
+//
+// - Returns the length of the environment variable string value (excluding
+// the terminating 0) if it is set and its contents (including the terminating
+// 0) can be stored in the 'buffer' without truncation.
+//
+// - Returns negated length of environment variable string value and writes
+// "\0" to the buffer (if it is not NULL) if the 'buffer_size' is to small to
+// store the value (including the terminating 0) without truncation.
+//
+// - Returns 0 and writes "\0" to the buffer (if not NULL) if the environment
+// variable is not set.
+//
+// - Returns INT_MIN if the 'name' is NULL.
+//
+// - Returns INT_MIN if the 'buffer_size' is negative.
+//
+// - Returns INT_MIN if the 'buffer' is NULL and 'buffer_size' is greater than
+// zero. Passing NULL 'buffer' with 'buffer_size' set to 0 can be used to
+// retrieve the length of the environment variable value string.
+//
+int getenv(const char *name, char *buffer, int buffer_size);
+// Reads an integer from the environment
+int getenv_int(const char *name, int default_value = 0);
+bool jit_dump_enabled();
+FILE *fopen(const char *filename, const char *mode);
+
+constexpr int msan_enabled = MSAN_ENABLED;
+inline void msan_unpoison(void *ptr, size_t size) {
+#if MSAN_ENABLED
+    __msan_unpoison(ptr, size);
+#endif
+}
 
 }
 }
