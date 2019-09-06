@@ -127,8 +127,8 @@ struct jit_uni_pooling_bwd_t: public cpu_primitive_t {
 
             if (desc()->alg_kind == alg_kind::pooling_max) {
                 init_default_ws();
-                if (!compare_ws(hint_fwd_pd_))
-                    return status::unimplemented;
+//                if (!compare_ws(hint_fwd_pd_))
+//                    return status::unimplemented;
             }
 
             return jit_uni_pool_kernel<isa>::init_conf(jpp_, this);
